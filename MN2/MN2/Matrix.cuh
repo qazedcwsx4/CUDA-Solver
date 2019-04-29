@@ -11,13 +11,15 @@ class Matrix
 private:
 	unsigned int rows;
 	unsigned int cols;
-	float *mat;
+	float* mat;
 public:
 	Matrix(int cols, int rows);
 	static Matrix* ZeroCPU(int cols, int rows);
+	static Matrix* OneCPU(int cols, int rows);
 	static Matrix* ZeroGPU(int cols, int rows);
-	Matrix *separateDiagonal();
+	friend Matrix* operator*(const Matrix& a, const Matrix* b);
+	Matrix* separateDiagonal();
+	Matrix* lu();
 	void print() const;
 	~Matrix();
 };
-

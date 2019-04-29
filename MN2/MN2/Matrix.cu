@@ -1,33 +1,39 @@
 #include "Matrix.cuh"
 
+#define Zero ZeroCPU
+
 Matrix::Matrix(int cols, int rows) : cols(cols), rows(rows)
 {
-	cudaMallocManaged(&mat, cols * rows);
+	cudaMallocManaged(&mat, cols * rows * sizeof(float));
 }
 
 Matrix* Matrix::ZeroCPU(int cols, int rows)
 ///zdaje mi sie, ze metoda bedzie wykonywania stosunkowo niewiele razy wiec nie potrzebuje zrownoleglenia.
 {
 	Matrix* ret = new Matrix(cols, rows);
-	/*for (long i = 0; i < cols * rows; i++)
+
+	for (long i = 0; i < cols * rows; i++)
 	{
 		ret->mat[i] = 0.0f;
-	}*/
-
-	for (int i = 0; i < rows; ++i)
-	{
-		for (int j = 0; j < cols; ++j)
-		{
-			ret->mat[i] = 0.0f;
-		}
 	}
 
 	return ret;
 }
 
-__global__
+Matrix* Matrix::OneCPU(int cols, int rows)
+///zdaje mi sie, ze metoda bedzie wykonywania stosunkowo niewiele razy wiec nie potrzebuje zrownoleglenia.
+{
+	Matrix* ret = new Matrix(cols, rows);
 
-void ZeroGPUKernel(int n, float* A)
+	for (long i = 0; i < cols * rows; i++)
+	{
+		ret->mat[i] = 1.0f;
+	}
+
+	return ret;
+}
+
+__global__ void ZeroGPUKernel(const int n, float* A)
 {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	int stride = blockDim.x * gridDim.x;
@@ -46,6 +52,31 @@ Matrix* Matrix::ZeroGPU(int cols, int rows)
 	return ret;
 }
 
+__global__ void mulKernel(const int commonDim, const int cols, float* A, float* B, float* C)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	int stride = blockDim.x * gridDim.x;
+
+	int row = index / cols;
+	int col = index % cols;
+
+	C[index] = 0;
+	for (int i = 0; i < commonDim; i++)
+	{
+		C[index] += A[row * commonDim + i] * B[i * cols + col];
+	}
+}
+
+Matrix* Matrix::operator*(const Matrix* b) const
+{
+	if (this->cols != b->rows) throw "wrong dimensions for multiplication";
+	auto ret = new Matrix(this->rows, b->cols);
+	int blockCount = (this->rows * b->cols + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	mulKernel <<< blockCount, BLOCK_SIZE >>>(this->cols, ret->cols, this->mat, b->mat, ret->mat);
+	cudaDeviceSynchronize();
+	return ret;
+}
+
 
 Matrix* Matrix::separateDiagonal()
 {
@@ -57,6 +88,10 @@ Matrix* Matrix::separateDiagonal()
 		this->mat[i * cols + i] = 0.0f;
 	}
 	return ret;
+}
+
+Matrix* Matrix::lu()
+{
 }
 
 void Matrix::print() const
@@ -74,4 +109,9 @@ void Matrix::print() const
 Matrix::~Matrix()
 {
 	cudaFree(mat);
+}
+
+Matrix* operator*(const Matrix& a, const Matrix* b)
+{
+	return nullptr;
 }
