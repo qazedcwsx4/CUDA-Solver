@@ -9,12 +9,26 @@
 int main()
 {
 	auto start = std::chrono::steady_clock::now();
-	Matrix *a = Matrix::OneCPU(2, 2);
-	Matrix *b = Matrix::OneCPU(2, 2);
-	auto c = *a*b;
+
+	//auto A = new Matrix(10, 10);
+	auto A = Matrix::OneCPU(10, 10);
+	auto LU = A;
+
+
+	auto x = Matrix::ZeroCPU(1, 10);
+
+	float matB[] = {1, 2, 3, 4};
+	auto b = Matrix::ZeroCPU(1, 10);
+	auto I = Matrix::IdentityCPU(10, 10);
+	auto invD = A->separateDiagonal();
+	invD->inverseDiagonalInPlaceCPU();
+	invD->print();
+
+
+	//stworzylem potwora
+	//x = *(*(*-*invD * *LU) * *x) + *(*-*invD * *b);
+
 	auto end = std::chrono::steady_clock::now();
 	printf("Elapsed time: %lld ms\n", std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
-	matrix->separateDiagonal();
-	matrix->print();
 	return 0;
 }
