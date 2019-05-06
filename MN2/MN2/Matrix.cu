@@ -1,9 +1,20 @@
 #include "Matrix.cuh"
 #include <cstring>
 #include <fstream>
+#include <ctime>
+#include <device_functions.h>
+
+#ifdef __CUDACC__
+#define cuda_SYNCTHREADS() __syncthreads()
+#else
+#define cuda_SYNCTHREADS()
+#endif
+
 #define Zero ZeroCPU
 #define PRINT_LOG false
-#define TARGET_RESIDUE 0.000001
+//#define TARGET_RESIDUE ((double)1.0e-9);
+
+const double TARGET_RESIDUE = 1.0e-6;
 
 Matrix::Matrix(int cols, int rows) : cols(cols), rows(rows)
 {
@@ -55,6 +66,7 @@ Matrix Matrix::ZeroCPU(int cols, int rows)
 {
 	double* mat;
 	cudaMallocManaged(&mat, cols * rows * sizeof(double));
+	cudaDeviceSynchronize();
 	for (long i = 0; i < cols * rows; i++)
 	{
 		mat[i] = 0.0f;
@@ -73,7 +85,7 @@ Matrix Matrix::OneCPU(int cols, int rows)
 	return Matrix(cols, rows, mat);
 }
 
-/*__global__ void ZeroGPUKernel(const int n, double* A)
+__global__ void ZeroGPUKernel(const int n, double* A)
 {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	int stride = blockDim.x * gridDim.x;
@@ -85,12 +97,13 @@ Matrix Matrix::OneCPU(int cols, int rows)
 
 Matrix Matrix::ZeroGPU(int cols, int rows)
 {
-	Matrix* ret = new Matrix(cols, rows);
+	double* mat;
+	cudaMallocManaged(&mat, cols * rows * sizeof(double));
 	int blockCount = (cols * rows + BLOCK_SIZE - 1) / BLOCK_SIZE;
-	ZeroGPUKernel <<<blockCount, BLOCK_SIZE >>>(cols * rows, ret->mat);
+	ZeroGPUKernel <<<blockCount, BLOCK_SIZE >>>(cols * rows, mat);
 	cudaDeviceSynchronize();
-	return ret;
-}*/
+	return Matrix(cols, rows, mat);
+}
 
 Matrix Matrix::IdentityCPU(int cols, int rows)
 {
@@ -139,6 +152,60 @@ Matrix Matrix::Jacobi(const Matrix& A, const Matrix& b)
 		{
 			counter = 0;
 			res = (A * x - b).vectorEuclideanNorm();
+			printf("res: %f\n", res);
+		}
+	}
+	while (res > TARGET_RESIDUE);
+	return x;
+}
+
+Matrix Matrix::JacobiOptimal(const Matrix& A, const Matrix& b)
+{
+	// 25% czasu wykonania (80000us) prawdopodobnie kopiowanie pamieci z device na host i z powrotem
+	//auto LU = A;
+	//->
+	auto LU = Matrix(A.cols, A.rows);
+	copyGPU(LU, A);
+	//32x wzrost wydajnosci
+
+	//auto invD = (LU.separateDiagonal());
+	//invD.inverseDiagonalInPlaceCPU();
+	auto invD = Matrix(A.cols, A.rows);
+	separateDiagonalAndInverseGPU(invD, LU);
+
+	auto x = ZeroGPU(1, A.getRows());
+
+	//auto temp1 = invD * b;
+	auto temp1 = Matrix(1, A.rows);
+	refMul(temp1, invD, b);
+
+	//auto M = -invD * LU;
+	//auto M = Matrix(A.cols, A.rows);
+	auto M = Matrix(A.cols, A.rows);
+	additiveInverseInPlaceGPU(invD);
+	refMulDiag(M, invD, LU);
+
+
+	double res = 100;
+	int counter = 9;
+
+	auto memmul = Matrix(1, A.rows);
+
+	auto memmulres = Matrix(1, A.rows);
+	auto resVector = Matrix(1, A.rows);
+
+	do
+	{
+		refMul(memmul, M, x);
+		refAdd(x, memmul, temp1);
+		//x = (M * x + temp);
+		if (counter++ == 9)
+		{
+			counter = 0;
+			refMul(memmulres, A, x);
+			refSub(resVector, memmulres, b);
+			res = resVector.vectorEuclideanNorm();
+			//printf("res: %f\n", res);
 		}
 	}
 	while (res > TARGET_RESIDUE);
@@ -172,7 +239,7 @@ Matrix Matrix::BackwardSubstitution(const Matrix& A, const Matrix& b)
 	for (int i = x.rows - 1; i >= 0; --i)
 	{
 		double sum = 0;
-		for (int j = i+1; j < A.cols; ++j)
+		for (int j = i + 1; j < A.cols; ++j)
 		{
 			sum += A.mat[i * A.cols + j] * x.mat[j];
 		}
@@ -206,7 +273,71 @@ Matrix Matrix::GaussSeidel(const Matrix& A, const Matrix& b)
 	return -x;
 }
 
+Matrix Matrix::GaussSeidelOptimal(const Matrix& A, const Matrix& b)
+{
+	//auto DL = (A.lowerCPU() + A.diagonalCPU());
+	//auto U = A.upperCPU();
+	/*auto DL = Matrix(A.cols, A.rows);
+	auto U = Matrix(A.cols, A.rows);
+	copyGPU(DL, A);
+	separateUpperGPU(U, DL);*/
+
+	auto DL = (A.lowerCPU() + A.diagonalCPU());
+	auto U = A.upperCPU();
+
+	auto x = ZeroCPU(1, A.getRows());
+	auto temp = Matrix::ForwardSubstitution(DL, b);
+
+	auto memmul = Matrix(1, A.rows);
+	auto memforwardsub = Matrix(1, A.rows);
+
+
+	auto memmulres = Matrix(1, A.rows);
+	auto resVector = Matrix(1, A.rows);
+	double res;
+	int counter = 9;
+
+	do
+	{
+		//x = -(Matrix::ForwardSubstitution(DL, U * x)) + temp;
+		refMul(memmul, U, x);
+
+		forwardSubstitutionGPU(memforwardsub, DL, memmul);
+		//memforwardsub = Matrix::ForwardSubstitution(DL, memmul);
+
+		//double xd = maxError(memforwardsub, memforwardsub2);
+
+		additiveInverseInPlaceGPU(memforwardsub);
+		refAdd(x, memforwardsub, temp);
+
+		//x = memforwardsub + temp;
+		if (counter++ == 9)
+		{
+			counter = 0;
+			refMul(memmulres, A, x);
+			refSub(resVector, memmulres, b);
+			res = resVector.vectorEuclideanNorm();
+		}
+		printf("res: %f \n", res);
+		//(x).print();
+	}
+	while (res > TARGET_RESIDUE);
+	return x;
+}
+
 Matrix Matrix::LUMehtod(const Matrix& A, const Matrix& b)
+{
+	Matrix L = Matrix::Stub();
+	Matrix U = Matrix::Stub();
+
+	Matrix::doolitle(L, U, A);
+
+	auto y = Matrix::ForwardSubstitution(L, b);
+
+	return Matrix::BackwardSubstitution(U, y);
+}
+
+Matrix Matrix::LUMehtodOptimal(const Matrix& A, const Matrix& b)
 {
 	Matrix L = Matrix::Stub();
 	Matrix U = Matrix::Stub();
@@ -245,6 +376,256 @@ void Matrix::doolitle(Matrix& L, Matrix& U, const Matrix& A)
 			L.mat[i * U.cols + j] = 1 / U.mat[j * U.cols + j] * (A.mat[i * U.cols + j] - sum);
 		}
 	}
+}
+
+__global__ void doolitleKernel(const int n, double* A, double* B)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	int stride = blockDim.x * gridDim.x;
+
+	for (int j = index; j < n; j += stride)
+	{
+		A[j] = B[j];
+	}
+}
+
+
+void Matrix::doolitleGPU(Matrix& L, Matrix& U, const Matrix& A)
+{
+	int blockCount = (A.rows * A.cols + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	//doolitleKernel <<< blockCount, BLOCK_SIZE >>> (A.rows * A.cols, A.mat);
+	cudaDeviceSynchronize();
+}
+
+void Matrix::createTest(Matrix& A, Matrix& b, Matrix& x, int size)
+{
+	srand(time(NULL));
+
+	const int constrange = 100;
+	const auto r = [](int range)-> double { return (double)(rand() % 20000) / 100 - 100; };
+	x = Matrix(1, size);
+	A = Matrix(size, size);
+	b = Matrix(1, size);
+	for (int i = 0; i < size; ++i)
+	{
+		x.mat[i] = r(100);
+	}
+
+	for (int i = 0; i < size; ++i)
+	{
+		double sum = 0;
+		for (int j = 0; j < size; ++j)
+		{
+			if (i != j)
+			{
+				A.mat[i * size + j] = r(100);
+				sum += fabs(A.mat[i * size + j]);
+			}
+			double randomized = r(100);
+			if (randomized > 0)
+			{
+				A.mat[i * size + i] = sum + r(10);
+			}
+			else
+			{
+				A.mat[i * size + i] = -sum + r(10);
+			}
+		}
+	}
+
+	for (int i = 0; i < size; ++i)
+	{
+		double sum = 0;
+		for (int j = 0; j < size; ++j)
+		{
+			sum += A.mat[i * size + j] * x.mat[j];
+		}
+		b.mat[i] = sum;
+	}
+}
+
+void Matrix::createTask(Matrix& A, Matrix& b, const int size)
+{
+	//const int size = 994;
+	const int a1 = 5 + 7;
+	const int a2 = -1;
+	const int a3 = a2;
+	const int inSin(1 + 1);
+	A = Matrix::ZeroCPU(size, size);
+	b = Matrix(1, size);
+
+	for (int i = 0; i < size; ++i)
+	{
+		A.mat[size * i + i] = a1;
+		if (size * i + i - 1 >= 0)
+			A.mat[size * i + i - 1] = a2;
+		if (size * i + i - 2 >= 0)
+			A.mat[size * i + i - 2] = a3;
+		if (size * i + i + 1 < size * size)
+			A.mat[size * i + i + 1] = a2;
+		if (size * i + i + 2 < size * size)
+			A.mat[size * i + i + 2] = a3;
+	}
+
+	for (int i = 0; i < size; ++i)
+	{
+		b.mat[i] = sin(i * inSin);
+	}
+}
+
+void Matrix::createTaskC(Matrix& A, Matrix& b)
+{
+	const int size = 994;
+	const int a1 = 3;
+	const int a2 = -1;
+	const int a3 = a2;
+	const int inSin(1 + 1);
+	A = Matrix::ZeroCPU(size, size);
+	b = Matrix(1, size);
+
+	for (int i = 0; i < size; ++i)
+	{
+		A.mat[size * i + i] = a1;
+		if (size * i + i - 1 >= 0)
+			A.mat[size * i + i - 1] = a2;
+		if (size * i + i - 2 >= 0)
+			A.mat[size * i + i - 2] = a3;
+		if (size * i + i + 1 < size * size)
+			A.mat[size * i + i + 1] = a2;
+		if (size * i + i + 2 < size * size)
+			A.mat[size * i + i + 2] = a3;
+	}
+
+	for (int i = 0; i < size; ++i)
+	{
+		b.mat[i] = sin(i * inSin);
+	}
+}
+
+double Matrix::maxError(Matrix& x, Matrix& r)
+{
+	if (x.rows * x.cols != r.rows * r.cols) throw "Matrices are not the same size";
+	double max = 0;
+	for (int i = 0; i < x.rows * x.cols; ++i)
+	{
+		if (fabs(x.mat[i] - r.mat[i]) > max)
+			max = fabs(x.mat[i] - r.mat[i]);
+	}
+	return max;
+}
+
+__global__ void copyKernel(const int n, double* A, double* B)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	int stride = blockDim.x * gridDim.x;
+
+	for (int j = index; j < n; j += stride)
+	{
+		A[j] = B[j];
+	}
+}
+
+void Matrix::copyGPU(Matrix& a, const Matrix& b)
+{
+	int blockCount = (a.cols * a.rows + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	copyKernel <<< blockCount, BLOCK_SIZE >>>(a.cols * a.rows, a.mat, b.mat);
+	cudaDeviceSynchronize();
+}
+
+__global__ void separateDiagonalKernel(const int n, double* d, double* A)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	int stride = blockDim.x * gridDim.x;
+
+	for (int j = index; j < n; j += stride)
+	{
+		d[j * n + j] = 1 / A[j * n + j];
+		A[j * n + j] = 0;
+	}
+}
+
+void Matrix::separateDiagonalAndInverseGPU(Matrix& d, Matrix& A)
+{
+	int blockCount = (A.cols + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	separateDiagonalKernel <<< blockCount, BLOCK_SIZE >>>(A.cols, d.mat, A.mat);
+	cudaDeviceSynchronize();
+}
+
+__global__ void separateUpperKernel(const int n, const int cols, double* U, double* A)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	int stride = blockDim.x * gridDim.x;
+
+	for (int j = index; j < n; j += stride)
+	{
+		int row = j / cols;
+		int col = j % cols;
+		if (col > row)
+		{
+			U[j] = A[j];
+			A[j] = 0;
+		}
+	}
+}
+
+void Matrix::separateUpperGPU(Matrix& U, Matrix& A)
+{
+	int blockCount = (A.cols + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	separateUpperKernel <<< blockCount, BLOCK_SIZE >>>(A.cols * A.rows, A.cols, U.mat, A.mat);
+	cudaDeviceSynchronize();
+}
+
+__global__ void additiveInverseInPlaceKernel(const int n, double* A)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	int stride = blockDim.x * gridDim.x;
+
+	for (int j = index; j < n; j += stride)
+	{
+		A[j] = -A[j];
+	}
+}
+
+void Matrix::additiveInverseInPlaceGPU(Matrix& A)
+{
+	int blockCount = (A.rows * A.cols + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	additiveInverseInPlaceKernel <<< blockCount, BLOCK_SIZE >>>(A.rows * A.cols, A.mat);
+	cudaDeviceSynchronize();
+}
+
+__global__ void forwardSubstitutionKernel(const int n, double* A, double* b, double* x)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	int stride = blockDim.x * gridDim.x;
+
+	for (int j = index; j < n; j += stride)
+	{
+		double sum = 0;
+		for (int i = 0; i < n; i++)
+		{
+			if (i == j)
+			{
+				x[j] = (b[j] - sum) / A[j * n + j];
+			}
+			cuda_SYNCTHREADS();
+			if (i < j)
+			{
+				sum += A[j * n + i] * x[i];
+			}
+		}
+	}
+}
+
+void Matrix::forwardSubstitutionGPU(Matrix& result, const Matrix& A, const Matrix& b)
+{
+	int blockCount = 1;
+	int blockSize = pow(2, ceil(log2f(A.cols)));
+	forwardSubstitutionKernel <<< blockCount, blockSize >>>(A.cols, A.mat, b.mat, result.mat);
+	cudaDeviceSynchronize();
+}
+
+void Matrix::backwardSubstitutionGPU(Matrix& result, const Matrix& A, const Matrix& b)
+{
 }
 
 void Matrix::toFile(std::string path)
@@ -385,6 +766,33 @@ __global__ void mulKernel(const int commonDim, const int cols, const int n, doub
 	}
 }
 
+void Matrix::refMul(Matrix& result, const Matrix& a, const Matrix& b)
+{
+	int blockCount = (a.rows * b.cols + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	mulKernel <<< blockCount, BLOCK_SIZE >>>(a.cols, b.cols, b.cols * a.rows, a.mat, b.mat, result.mat);
+	cudaDeviceSynchronize();
+}
+
+__global__ void mulDiagKernel(const int commonDim, const int cols, const int n, double* A, double* B, double* C)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	int stride = blockDim.x * gridDim.x;
+
+	for (int j = index; j < n; j += stride)
+	{
+		int row = j / cols;
+		int col = j % cols;
+		C[j] = A[row * commonDim + row] * B[row * commonDim + col];
+	}
+}
+
+void Matrix::refMulDiag(Matrix& result, const Matrix& a, const Matrix& b)
+{
+	int blockCount = (a.rows * b.cols + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	mulDiagKernel << < blockCount, BLOCK_SIZE >> >(a.cols, b.cols, b.cols * a.rows, a.mat, b.mat, result.mat);
+	cudaDeviceSynchronize();
+}
+
 Matrix operator*(const Matrix& a, const Matrix& b)
 {
 	if (a.cols != b.rows) throw "wrong dimensions for multiplication";
@@ -408,6 +816,13 @@ __global__ void addKernel(const int n, double* A, double* B, double* C)
 	}
 }
 
+void Matrix::refAdd(Matrix& result, const Matrix& a, const Matrix& b)
+{
+	int blockCount = (a.cols * a.rows + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	addKernel <<< blockCount, BLOCK_SIZE >>>(a.cols * a.rows, a.mat, b.mat, result.mat);
+	cudaDeviceSynchronize();
+}
+
 Matrix operator+(const Matrix& a, const Matrix& b)
 {
 	if (a.cols != b.cols || a.rows != b.rows) throw "dimensions must equal for addition";
@@ -429,6 +844,13 @@ __global__ void subKernel(const int n, double* A, double* B, double* C)
 	{
 		C[j] = A[j] - B[j];
 	}
+}
+
+void Matrix::refSub(Matrix& result, const Matrix& a, const Matrix& b)
+{
+	int blockCount = (a.cols * a.rows + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	subKernel <<< blockCount, BLOCK_SIZE >> >(a.cols * a.rows, a.mat, b.mat, result.mat);
+	cudaDeviceSynchronize();
 }
 
 Matrix operator-(const Matrix& a, const Matrix& b)
