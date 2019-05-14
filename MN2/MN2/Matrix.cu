@@ -142,20 +142,23 @@ Matrix Matrix::Jacobi(const Matrix& A, const Matrix& b)
 	invD.inverseDiagonalInPlaceCPU();
 	auto M = -invD * LU;
 	auto temp = invD * b;
-	double res;
-	int counter = 9;
+	double res = 1;
+	int counter = 0;
 
 	do
 	{
 		x = (M * x + temp);
-		if (counter++ == 9)
-		{
-			counter = 0;
-			res = (A * x - b).vectorEuclideanNorm();
-			printf("res: %f\n", res);
-		}
+		//if (counter++ == 9)
+		//{
+		//	counter = 0;
+		res = (A * x - b).vectorEuclideanNorm();
+		//	printf("res: %f\n", res);
+		//}
+		counter++;
 	}
 	while (res > TARGET_RESIDUE);
+	printf("res: %d \n", counter);
+
 	return x;
 }
 
@@ -191,7 +194,7 @@ Matrix Matrix::JacobiOptimal(const Matrix& A, const Matrix& b)
 
 	auto memmul = Matrix(1, A.rows);
 
-	auto memmulres = Matrix(1, A.rows);
+	auto _Amulx = Matrix(1, A.rows);
 	auto resVector = Matrix(1, A.rows);
 
 	do
@@ -202,8 +205,8 @@ Matrix Matrix::JacobiOptimal(const Matrix& A, const Matrix& b)
 		if (counter++ == 9)
 		{
 			counter = 0;
-			refMul(memmulres, A, x);
-			refSub(resVector, memmulres, b);
+			refMul(_Amulx, A, x);
+			refSub(resVector, _Amulx, b);
 			res = resVector.vectorEuclideanNorm();
 			//printf("res: %f\n", res);
 		}
@@ -254,8 +257,8 @@ Matrix Matrix::GaussSeidel(const Matrix& A, const Matrix& b)
 	auto U = A.upperCPU();
 	auto x = ZeroCPU(1, A.getRows());
 	auto temp = Matrix::ForwardSubstitution(DL, b);
-	double res;
-	int counter = 9;
+	double res = 1;
+	int counter = 0;
 
 	do
 	{
@@ -263,13 +266,14 @@ Matrix Matrix::GaussSeidel(const Matrix& A, const Matrix& b)
 		x = (Matrix::ForwardSubstitution(DL, U * x)) + temp;
 		//if (counter++ == 9)
 		//{
-		//	counter = 0;
+		counter++;
 		res = (A * (-x) - b).vectorEuclideanNorm();
 		//}
 		//printf("res: %f \n", res);
 		//(x).print();
 	}
 	while (res > TARGET_RESIDUE);
+	printf("res: %d \n", counter);
 	return -x;
 }
 
@@ -277,13 +281,13 @@ Matrix Matrix::GaussSeidelOptimal(const Matrix& A, const Matrix& b)
 {
 	//auto DL = (A.lowerCPU() + A.diagonalCPU());
 	//auto U = A.upperCPU();
-	/*auto DL = Matrix(A.cols, A.rows);
+	auto DL = Matrix(A.cols, A.rows);
 	auto U = Matrix(A.cols, A.rows);
 	copyGPU(DL, A);
-	separateUpperGPU(U, DL);*/
+	separateUpperGPU(U, DL);
 
-	auto DL = (A.lowerCPU() + A.diagonalCPU());
-	auto U = A.upperCPU();
+	//auto DL = (A.lowerCPU() + A.diagonalCPU());
+	//auto U = A.upperCPU();
 
 	auto x = ZeroCPU(1, A.getRows());
 	auto temp = Matrix::ForwardSubstitution(DL, b);
@@ -318,7 +322,7 @@ Matrix Matrix::GaussSeidelOptimal(const Matrix& A, const Matrix& b)
 			refSub(resVector, memmulres, b);
 			res = resVector.vectorEuclideanNorm();
 		}
-		printf("res: %f \n", res);
+		//printf("res: %f \n", res);
 		//(x).print();
 	}
 	while (res > TARGET_RESIDUE);
